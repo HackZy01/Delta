@@ -1,7 +1,4 @@
-# This workflow will build a Swift project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
-
-name: Swift
+name: Build Delta and Upload IPA
 
 on:
   push:
@@ -12,11 +9,75 @@ on:
 jobs:
   build:
 
-    runs-on: macos-latest
+    runs-on: macos-14  # or 'macos-latest', but macOS 14+ comes with Xcode 15 preinstalled
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+      with:
+        lfs: true  # Important: download Git LFS files!
+
+    - name: Set up submodules
+      run: git submodule update --init --recursive
+
+    - name: Install dependencies
+      run: |
+        brew install cocoapods
+        pod install --project-directory=Systems
+
+    - name: Set up signing
+      run: |
+        # Replace TEAM_ID and BUNDLE_ID_SUFFIX with your values
+        TEAM_ID="YOUR_TEAM_ID"
+        BUNDLE_ID_SUFFIX="mygithubusername"
+
+        # Update Systems signing
+        plutil -replace PROVISIONING_PROFILE_SPECIFIER -string "" Systems/Systems.xcodeproj/project.pbxproj
+        plutil -replace DEVELOPMENT_TEAM -string "$TEAM_ID" Systems/Systems.xcodeproj/project.pbxproj
+
+        # Update Delta signing
+        plutil -replace PROVISIONING_PROFILE_SPECIFIER -string "" Delta.xcodeproj/project.pbxproj
+        plutil -replace DEVELOPMENT_TEAM -string "$TEAM_ID" Delta.xcodeproj/project.pbxproj
+
+        # Update Bundle Identifier
+        sed -i '' "s/com.rileytestut.Delta/com.rileytestut.Delta.$BUNDLE_ID_SUFFIX/g" Delta/Delta/Info.plist
+
+    - name: Build Delta
+      run: |
+        xcodebuild clean archive \
+          -workspace Delta.xcworkspace \
+          -scheme Delta \
+          -configuration Release \
+          -sdk iphoneos \
+          -archivePath $PWD/build/Delta.xcarchive \
+          DEVELOPMENT_TEAM=$TEAM_ID \
+          CODE_SIGN_STYLE=Automatic
+
+    - name: Export IPA
+      run: |
+        cat > ExportOptions.plist <<EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>method</key>
+          <string>development</string>
+          <key>signingStyle</key>
+          <string>automatic</string>
+          <key>stripSwiftSymbols</key>
+          <true/>
+          <key>compileBitcode</key>
+          <false/>
+        </dict>
+        </plist>
+        EOF
+
+        xcodebuild -exportArchive \
+          -archivePath $PWD/build/Delta.xcarchive \
+          -exportPath $PWD/build/ipa \
+          -exportOptionsPlist ExportOptions.plist
+
+    - name: Upload IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: delta-ipa
+        path: build/ipa/*.ipa
